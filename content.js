@@ -73,13 +73,6 @@ async function processMessages() {
     // Mark as processed
     item.setAttribute('data-inboxzen-processed', 'true');
     
-    // Check if this is an unread message (from someone else)
-    const isUnread = item.querySelector('.msg-conversation-card__unread-count');
-    if (!isUnread) {
-      // Skip messages that have been read or are sent by you
-      continue;
-    }
-    
     // Get message info
     const messageId = item.getAttribute('id');
     const messageText = extractMessageText(item);
