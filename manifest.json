@@ -1,12 +1,13 @@
 {
   "manifest_version": 3,
   "name": "InboxZen for LinkedIn",
-  "version": "1.0.0",
+  "version": "1.0.3",
   "description": "Automatically categorize LinkedIn messages",
   "permissions": [
     "storage",
     "scripting",
-    "activeTab"
+    "activeTab",
+    "tabs"
   ],
   "host_permissions": [
     "https://www.linkedin.com/*"

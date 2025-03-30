@@ -25,6 +25,18 @@ function loadSettings() {
     const cachedClassifications = data.cachedClassifications || {};
     const count = Object.keys(cachedClassifications).length;
     document.getElementById('cacheCount').textContent = count;
+    
+    // Show cache version and expiry if debugging elements exist
+    const versionElement = document.getElementById('cacheVersion');
+    if (versionElement && data.cacheVersion) {
+      versionElement.textContent = data.cacheVersion;
+    }
+    
+    const expiryElement = document.getElementById('cacheExpiry');
+    if (expiryElement && data.cacheExpiry) {
+      const expiryDate = new Date(data.cacheExpiry);
+      expiryElement.textContent = expiryDate.toLocaleString();
+    }
   });
 }
 
@@ -49,18 +61,21 @@ function saveSettings() {
 
 // Clear cache
 function clearCache() {
-  chrome.storage.local.set({ cachedClassifications: {} }, () => {
-    document.getElementById('cacheCount').textContent = '0';
-    
-    // Show cleared confirmation
-    const button = document.getElementById('clearCache');
-    const originalText = button.textContent;
-    button.textContent = 'Cache Cleared!';
-    button.disabled = true;
-    
-    setTimeout(() => {
-      button.textContent = originalText;
-      button.disabled = false;
-    }, 1500);
+  // Use the message for clearing cache
+  chrome.runtime.sendMessage({ action: 'clearCache' }, (response) => {
+    if (response && response.success) {
+      document.getElementById('cacheCount').textContent = '0';
+      
+      // Show cleared confirmation
+      const button = document.getElementById('clearCache');
+      const originalText = button.textContent;
+      button.textContent = 'Cache Cleared!';
+      button.disabled = true;
+      
+      setTimeout(() => {
+        button.textContent = originalText;
+        button.disabled = false;
+      }, 1500);
+    }
   });
 }
