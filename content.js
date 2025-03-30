@@ -33,6 +33,9 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Set up observer to detect notification badges
   setupNotificationObserver();
   
+  // Set up observer to detect when messages are marked as read (by badge removal)
+  setupReadStatusObserver();
+  
   // Add keyboard shortcuts
   setupKeyboardShortcuts();
   
@@ -394,74 +397,106 @@ function setupMessageObserver() {
   }
 }
 
-// Process all messages in the list
-async function processMessages() {
+// Process messages in the list
+// isInitialLoad: If true, only process unread messages. If false, process as usual (new/changed/cached).
+async function processMessages(isInitialLoad = false) {
   const messageItems = document.querySelectorAll('.msg-conversation-card');
-  
+  console.log(`Processing ${messageItems.length} messages. Initial Load: ${isInitialLoad}`);
+
   if (messageItems.length === 0) {
     return;
   }
-  
+
   for (const item of messageItems) {
     const messageId = item.getAttribute('id');
     if (!messageId) continue;
-    
-    // Check for notification badges that indicate new messages
-    const hasNotification = !!item.querySelector(`.${NOTIFICATION_INDICATORS.BADGE_CLASS}.${NOTIFICATION_INDICATORS.BADGE_SHOW_CLASS}`);
-    const hasNewMessageText = Array.from(item.querySelectorAll(`.${NOTIFICATION_INDICATORS.ALLY_TEXT_CLASS}`))
-      .some(el => el.textContent && el.textContent.toLowerCase().includes('new notification'));
-    
-    // Get current message text and store it for change detection
-    const messageText = extractMessageText(item);
-    const senderName = extractSenderName(item);
-    const subject = extractSubject(item);
-    
-    // Store current snippet for future comparison
-    if (messageText) {
-      processedSnippets.set(messageId, messageText);
-    }
-    
-    // Determine if we should use cache or classify again
+
+    // Check if the message is unread (has notification indicators)
+    const isUnread = !!item.querySelector(`.${NOTIFICATION_INDICATORS.BADGE_CLASS}.${NOTIFICATION_INDICATORS.BADGE_SHOW_CLASS}`) ||
+                     Array.from(item.querySelectorAll(`.${NOTIFICATION_INDICATORS.ALLY_TEXT_CLASS}`))
+                       .some(el => el.textContent && el.textContent.toLowerCase().includes('new notification'));
+
+    // --- Logic based on Initial Load vs Subsequent Load ---
+
     let category = null;
-    
-    // If there's a notification badge, always reclassify regardless of cache
-    if (hasNotification || hasNewMessageText) {
-      console.log(`Notification detected in conversation ${messageId}, forcing classification`);
-      
-      // Clear any existing cache for this conversation
+    let shouldClassify = false;
+    let requiresCacheUpdate = false;
+
+    if (isInitialLoad) {
+      // --- Initial Load ---
+      if (isUnread) {
+        // Process only unread messages
+        console.log(`Initial Load: Processing unread message ${messageId}`);
+        shouldClassify = true;
+      } else {
+        // Skip read messages, ensure no tag
+        console.log(`Initial Load: Skipping read message ${messageId}`);
+        const existingTag = item.querySelector('.inboxzen-tag');
+        if (existingTag) existingTag.remove();
+        continue; // Skip to next item
+      }
+    } else {
+      // --- Subsequent Load (e.g., triggered by observer) ---
+      if (isUnread) {
+        // Always re-classify unread/notified messages on subsequent loads
+        console.log(`Subsequent Load: Processing unread/notified message ${messageId}`);
+        shouldClassify = true;
+      } else {
+        // Read message encountered on subsequent load
+        if (cachedClassifications[messageId]) {
+          // Use cache if available
+          category = cachedClassifications[messageId];
+          console.log(`Subsequent Load: Using cached category for read message ${messageId}: ${category}`);
+        } else {
+          // Read message, not in cache - do nothing, ensure no tag
+          console.log(`Subsequent Load: Skipping read message ${messageId} (not in cache)`);
+           const existingTag = item.querySelector('.inboxzen-tag');
+           if (existingTag) existingTag.remove();
+          continue; // Skip applying category
+        }
+      }
+    }
+
+    // --- Classification (if needed) ---
+    if (shouldClassify) {
+      // Extract details needed for classification
+      const messageText = extractMessageText(item);
+      const senderName = extractSenderName(item);
+      const subject = extractSubject(item);
+
+      // Store snippet for change detection (only if classifying)
+      if (messageText) {
+        processedSnippets.set(messageId, messageText);
+      }
+
+      // Force re-classification by clearing cache first for reliability
       if (cachedClassifications[messageId]) {
+        console.log(`Clearing cache for ${messageId} before re-classification.`);
         delete cachedClassifications[messageId];
       }
-      
-      // Classify the message
+
       category = await classifyMessage(messageText, senderName, subject);
-      
-      // Cache the new result
+      console.log(`Classified ${messageId} as: ${category}`);
+
+      // Update cache with the new result
       cachedClassifications[messageId] = category;
-      console.log(' calling update cache');
-      updateCache();
-      
-      console.log(`Reclassified conversation ${messageId} with notification as: ${category}`);
-    } 
-    // Otherwise check cache first
-    else if (cachedClassifications[messageId]) {
-      category = cachedClassifications[messageId];
-    } 
-    // No cache, classify for the first time
-    else {
-      category = await classifyMessage(messageText, senderName, subject);
-      
-      // Cache the new result
-      cachedClassifications[messageId] = category;
-      console.log(' calling update cache');
-      updateCache();
-      
-      console.log(`Classified message ${messageId} as: ${category}`);
+      requiresCacheUpdate = true; // Mark that cache needs saving
     }
-    
-    // Apply UI changes
-    applyCategory(item, category);
+
+    // --- Apply UI ---
+    if (category) {
+      applyCategory(item, category);
+    }
+    // If !category (only happens if read message on subsequent load wasn't in cache), tag is already removed or wasn't there.
+
+    // --- Update Cache in Storage (if needed) ---
+    // We only call updateCache once per message that required classification/caching
+    if (requiresCacheUpdate) {
+      console.log(' calling update cache');
+      updateCache(); // Send the entire updated local cache to background
+    }
   }
+  console.log(`Finished processing messages. Initial Load: ${isInitialLoad}`);
 }
 
 // Extract message text from a conversation card
@@ -712,6 +747,101 @@ function addFilterIndicator(category) {
   }
 }
 
+// Set up observer to detect when messages are marked as read (by badge removal)
+function setupReadStatusObserver() {
+  const observer = new MutationObserver((mutations) => {
+    for (const mutation of mutations) {
+      // We are interested in nodes being removed from the DOM
+      if (mutation.type === 'childList' && mutation.removedNodes.length > 0) {
+        mutation.removedNodes.forEach(removedNode => {
+          // Check if the removed node is an element node
+          if (removedNode.nodeType === Node.ELEMENT_NODE) {
+            // Check if the removed node itself, or any of its descendants,
+            // contains the specific notification elements.
+            // We look for the 'show' class or the specific a11y text.
+            const wasNotificationBadge = removedNode.classList.contains(NOTIFICATION_INDICATORS.BADGE_SHOW_CLASS) ||
+                                         removedNode.querySelector(`.${NOTIFICATION_INDICATORS.BADGE_SHOW_CLASS}`);
+
+            const hadA11yText = (removedNode.classList.contains(NOTIFICATION_INDICATORS.ALLY_TEXT_CLASS) && removedNode.textContent?.includes('notification')) ||
+                                removedNode.querySelector(`.${NOTIFICATION_INDICATORS.ALLY_TEXT_CLASS}[data-test-notification-a11y]`);
+
+
+            if (wasNotificationBadge || hadA11yText) {
+              // If a notification element was removed, find the parent conversation card
+              // The 'target' of the mutation is the element the node was removed from.
+              const conversationCard = mutation.target.closest('.msg-conversation-card');
+
+              if (conversationCard) {
+                console.log(`Notification badge removed from conversation ${conversationCard.id}, marking as read.`);
+                // Call the function to remove the tag and cache entry
+                handleMessageRead(conversationCard);
+              } else {
+                 // It's possible the card itself was removed, or the structure is unexpected.
+                 // We might not need to do anything here if the card is gone anyway.
+                 console.log('Notification element removed, but parent conversation card not found directly from mutation target.');
+              }
+            }
+          }
+        });
+      }
+    }
+  });
+
+  // Start observing the container where messages appear
+  const messagesContainer = document.querySelector('.msg-conversations-container');
+  if (messagesContainer) {
+    observer.observe(messagesContainer, {
+      childList: true, // Watch for nodes being added or removed
+      subtree: true    // Watch descendants as well
+    });
+    console.log('Read status observer (badge removal) setup successfully');
+  } else {
+    // Retry if the container isn't found immediately
+    console.warn('Messages container not found for read status observer, retrying...');
+    setTimeout(setupReadStatusObserver, 1000);
+  }
+}
+
+// Function to handle removing tags and cache for read messages (NO CHANGES NEEDED HERE)
+function handleMessageRead(conversationCard) {
+  if (!conversationCard) return;
+
+  const conversationId = conversationCard.id;
+  if (!conversationId) return;
+
+  // Check if it was previously classified (has a tag or is in cache)
+  const existingTag = conversationCard.querySelector('.inboxzen-tag');
+  const isInCache = cachedClassifications.hasOwnProperty(conversationId);
+  const isInProcessed = processedSnippets.has(conversationId);
+
+  if (existingTag || isInCache || isInProcessed) {
+    console.log(`Message ${conversationId} marked as read. Removing tag and cache entry.`);
+
+    // Remove the tag from the UI
+    if (existingTag) {
+      existingTag.remove();
+    }
+
+    let cacheUpdated = false;
+    // Remove from the local cache object
+    if (isInCache) {
+      delete cachedClassifications[conversationId];
+      cacheUpdated = true;
+    }
+
+    // Remove from processed snippets map
+    if (isInProcessed) {
+        processedSnippets.delete(conversationId);
+    }
+
+    // If the cache was modified, update the storage
+    if (cacheUpdated) {
+      console.log(' calling update cache');
+      updateCache();
+    }
+  }
+}
+
 // Initial execution
 setTimeout(() => {
   if (window.location.href.includes('linkedin.com/messaging')) {
@@ -721,6 +851,7 @@ setTimeout(() => {
       setupMessageObserver();
       setupContentChangeObserver();
       setupNotificationObserver();
+      setupReadStatusObserver();
       setupKeyboardShortcuts();
     });
   }
