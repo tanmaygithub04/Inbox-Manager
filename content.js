@@ -1,6 +1,10 @@
 // Main content script for LinkedIn message processing
+
+// Ensure Storage and UI classes are loaded if not using modules
+// (Handled by manifest.json load order)
+
 let settings = {};
-let cachedClassifications = {};
+let cachedClassifications = {}; // Local cache mirror
 let processedSnippets = new Map(); // Store processed message snippet texts
 
 // Define read indicators constants
@@ -21,60 +25,65 @@ const NOTIFICATION_INDICATORS = {
 
 // Initialize when DOM is fully loaded
 document.addEventListener('DOMContentLoaded', async () => {
+  console.log("InboxZen: DOMContentLoaded");
   // Load settings and cache
-  await loadSettings();
-  
-  // Set up mutation observer to detect new messages
+  await loadSettingsAndCache();
+
+  // Add Filter Controls (only if settings loaded successfully)
+  if (settings.categories && settings.categories.length > 0) {
+      UI.addFilterControls(settings.categories, handleFilterSelection, handleClearFilter);
+  } else {
+      console.warn("InboxZen: Categories not found in settings, cannot add filter controls.");
+  }
+
+  // Set up observers
   setupMessageObserver();
-  
-  // Set up observer to detect message content changes
   setupContentChangeObserver();
-  
-  // Set up observer to detect notification badges
   setupNotificationObserver();
-  
-  // Set up observer to detect when messages are marked as read (by badge removal)
   setupReadStatusObserver();
-  
+
   // Add keyboard shortcuts
   setupKeyboardShortcuts();
-  
+
   // Process existing messages
-  console.log(' calling process messages');
-  processMessages();
+  console.log('InboxZen: Initial processing of messages...');
+  processMessages(true); // Pass true for initial load
 });
 
-// Load settings from storage
-async function loadSettings() {
-  return new Promise((resolve) => {
-    chrome.runtime.sendMessage({ action: 'getSettings' }, (response) => {
-      if (response && response.settings) {
-        settings = response.settings;
-        
-        // Check cache version and expiry
-        const currentVersion = settings.cacheVersion || 1.0;
-        const cacheExpiry = settings.cacheExpiry || 0;
-        const now = Date.now();
-        
-        // If the cache has expired or the version has changed, clear it
-        if (now > cacheExpiry || currentVersion > (settings.cacheVersion || 1.0)) {
-          // Reset cache and set new expiry
-          cachedClassifications = {};
-          
-          // Update settings with new expiry date (7 days from now)
-          chrome.storage.local.set({
-            cachedClassifications: {},
-            cacheExpiry: now + 604800000, // 7 days
-            cacheVersion: currentVersion
-          });
-        } else {
-          // Otherwise use the cached classifications
-          cachedClassifications = settings.cachedClassifications || {};
-        }
-      }
-      resolve();
+// Load settings and validate/load cache from storage
+async function loadSettingsAndCache() {
+  console.log("InboxZen: Loading settings and cache...");
+  try {
+    // Use message passing to get settings from background script which uses Storage.js
+    settings = await new Promise((resolve, reject) => {
+        chrome.runtime.sendMessage({ action: 'getSettings' }, (response) => {
+            if (chrome.runtime.lastError) {
+                return reject(chrome.runtime.lastError);
+            }
+            if (response && response.settings) {
+                resolve(response.settings);
+            } else {
+                reject(new Error("Failed to get settings from background script."));
+            }
+        });
     });
-  });
+
+    console.log("InboxZen: Settings received:", settings);
+
+    // Validate cache using background script's Storage logic (implicitly done via getSettings)
+    // The background script should ensure cache is valid before sending it
+    // Or, we could add a specific validation message if needed.
+    // For now, assume the cache received is valid according to background script logic.
+
+    // Load the cache provided by the background script
+    cachedClassifications = settings.cachedClassifications || {};
+    console.log(`InboxZen: Cache loaded with ${Object.keys(cachedClassifications).length} entries.`);
+
+  } catch (error) {
+    console.error('InboxZen: Error loading settings or cache:', error);
+    settings = {}; // Reset settings on error
+    cachedClassifications = {}; // Reset cache on error
+  }
 }
 
 // Set up observer specifically to detect notification badges for new messages
@@ -156,17 +165,17 @@ function handleNewMessageNotification(badgeElement) {
   if (conversationCard) {
     const convId = conversationCard.id;
     if (convId) {
-      console.log('New message notification in conversation:', convId);
+      console.log('InboxZen: New message notification in conversation:', convId);
       triggerConversationUpdate(conversationCard);
     }
   } else {
     // If not directly in a conversation card, it might be a global notification
     // Trigger a full refresh of all conversations after a short delay
-    console.log('Global notification detected, will refresh all conversations');
+    console.log('InboxZen: Global notification detected, will refresh all conversations');
     setTimeout(() => {
-      console.log(' calling process messages');
+      console.log('InboxZen: Processing messages due to global notification.');
       processMessages();
-    }, 2000); // Wait 2 seconds for the UI to update
+    }, 2000);
   }
 }
 
@@ -177,9 +186,8 @@ function triggerConversationUpdate(conversationCard) {
   const convId = conversationCard.id;
   if (!convId) return;
 
-  console.log(`Update triggered for conversation ${convId}. Checking for snippet change.`);
-  // Start polling for snippet update
-  waitForSnippetUpdateAndClassify(convId, 0); // Start with 0 retries
+  console.log(`InboxZen: Update triggered for conversation ${convId}. Checking for snippet change.`);
+  waitForSnippetUpdateAndClassify(convId, 0); // Start polling for snippet update
 }
 
 // Polls for snippet changes before re-classifying
@@ -189,7 +197,7 @@ const SNIPPET_CHECK_INTERVAL = 250; // Milliseconds between checks
 function waitForSnippetUpdateAndClassify(convId, retryCount) {
   const conversationCard = document.getElementById(convId);
   if (!conversationCard) {
-    console.warn(`Conversation card ${convId} not found during snippet check.`);
+    console.warn(`InboxZen: Conversation card ${convId} not found during snippet check.`);
     return;
   }
 
@@ -204,19 +212,19 @@ function waitForSnippetUpdateAndClassify(convId, retryCount) {
   const isNewNonEmpty = !previousSnippet && currentSnippet !== '';
 
   if (hasChanged || isNewNonEmpty) {
-    console.log(`Snippet change detected for ${convId}. Previous: "${previousSnippet}", Current: "${currentSnippet}". Proceeding with classification.`);
+    console.log(`InboxZen: Snippet change detected for ${convId}. Previous: "${previousSnippet}", Current: "${currentSnippet}". Proceeding with classification.`);
     // Update the stored snippet *before* classifying
     processedSnippets.set(convId, currentSnippet);
     updateConversationCategory(convId);
   } else if (retryCount < MAX_SNIPPET_CHECK_RETRIES) {
     // Snippet hasn't changed yet, retry after interval
-    console.log(`Snippet for ${convId} unchanged (Retry ${retryCount + 1}/${MAX_SNIPPET_CHECK_RETRIES}). Retrying in ${SNIPPET_CHECK_INTERVAL}ms.`);
+    console.log(`InboxZen: Snippet for ${convId} unchanged (Retry ${retryCount + 1}/${MAX_SNIPPET_CHECK_RETRIES}). Retrying in ${SNIPPET_CHECK_INTERVAL}ms.`);
     setTimeout(() => {
       waitForSnippetUpdateAndClassify(convId, retryCount + 1);
     }, SNIPPET_CHECK_INTERVAL);
   } else {
     // Max retries reached, proceed anyway but log a warning
-    console.warn(`Snippet for ${convId} did not change after ${MAX_SNIPPET_CHECK_RETRIES} retries. Classifying with potentially old content: "${currentSnippet}"`);
+    console.warn(`InboxZen: Snippet for ${convId} did not change after ${MAX_SNIPPET_CHECK_RETRIES} retries. Classifying with potentially old content: "${currentSnippet}"`);
     // Still update the processed snippet in case it *did* change but was identical to the last recorded one
     if (currentSnippet !== '') {
         processedSnippets.set(convId, currentSnippet);
@@ -256,7 +264,7 @@ function setupContentChangeObserver() {
                 const previousSnippet = processedSnippets.get(convId) || '';
 
                 if (currentSnippet !== previousSnippet && currentSnippet !== '') {
-                    console.log(`Direct snippet change observed for ${convId}. Updating.`);
+                    console.log(`InboxZen (Content Observer): Direct snippet change observed for ${convId}. Updating.`);
                     processedSnippets.set(convId, currentSnippet); // Update immediately
                     conversationsToUpdate.add(convId);
                 }
@@ -294,7 +302,7 @@ function setupContentChangeObserver() {
                     if (currentSnippet !== '') {
                         const previousSnippet = processedSnippets.get(cardId) || '';
                          if (currentSnippet !== previousSnippet) {
-                            console.log(`Snippet content present in newly added card ${cardId}. Triggering update.`);
+                            console.log(`InboxZen (Content Observer): Snippet content present in newly added card ${cardId}. Triggering update.`);
                             processedSnippets.set(cardId, currentSnippet);
                             conversationsToUpdate.add(cardId);
                         }
@@ -309,7 +317,7 @@ function setupContentChangeObserver() {
 
     // Update the conversations with changed content detected by *this* observer
     conversationsToUpdate.forEach(convId => {
-      console.log(`Content observer forcing update for conversation: ${convId}`);
+      console.log(`InboxZen (Content Observer): Content observer forcing update for conversation: ${convId}`);
       // Use the standard update path which now includes the polling check
       const card = document.getElementById(convId);
       if(card) triggerConversationUpdate(card); // Use the main trigger function
@@ -324,7 +332,7 @@ function setupContentChangeObserver() {
       subtree: true,
       characterData: true // Important for direct text changes in snippets
     });
-    console.log('Content change observer setup successfully');
+    console.log('InboxZen: Content change observer setup successfully');
   } else {
     // If container not found, try again later
     setTimeout(setupContentChangeObserver, 1000);
@@ -336,7 +344,7 @@ function setupContentChangeObserver() {
 function updateConversationCategory(conversationId) {
   const conversationCard = document.getElementById(conversationId);
   if (!conversationCard) {
-      console.warn(`Cannot update category: Conversation card ${conversationId} not found.`);
+      console.warn(`InboxZen: Cannot update category: Conversation card ${conversationId} not found.`);
       return;
   }
 
@@ -354,15 +362,15 @@ function updateConversationCategory(conversationId) {
   const senderName = extractSenderName(conversationCard);
   const subject = extractSubject(conversationCard); // Subject usually doesn't change mid-convo
 
-  console.log(`Classifying conversation ${conversationId} with snippet: "${messageText}"`);
+  console.log(`InboxZen: Re-classifying conversation ${conversationId} with snippet: "${messageText}"`);
 
   // Classify the message with updated content
   classifyMessage(messageText, senderName, subject).then(category => {
-    console.log(`Conversation ${conversationId} reclassified as: ${category}`);
+    console.log(`InboxZen: Conversation ${conversationId} reclassified as: ${category}`);
 
     // Update local cache object
     cachedClassifications[conversationId] = category;
-    console.log(' calling update cache');
+    console.log('InboxZen: calling update cache');
     updateCache(); // Send the entire updated local cache to background
 
     // Update UI
@@ -382,7 +390,7 @@ function setupMessageObserver() {
     });
     
     if (shouldProcess) {
-      console.log(' calling process messages');
+      console.log('InboxZen: calling process messages');
       processMessages();
     }
   });
@@ -401,7 +409,7 @@ function setupMessageObserver() {
 // isInitialLoad: If true, only process unread messages. If false, process as usual (new/changed/cached).
 async function processMessages(isInitialLoad = false) {
   const messageItems = document.querySelectorAll('.msg-conversation-card');
-  console.log(`Processing ${messageItems.length} messages. Initial Load: ${isInitialLoad}`);
+  console.log(`InboxZen: Processing ${messageItems.length} messages. Initial Load: ${isInitialLoad}`);
 
   if (messageItems.length === 0) {
     return;
@@ -426,11 +434,11 @@ async function processMessages(isInitialLoad = false) {
       // --- Initial Load ---
       if (isUnread) {
         // Process only unread messages
-        console.log(`Initial Load: Processing unread message ${messageId}`);
+        console.log(`InboxZen: Initial Load: Processing unread message ${messageId}`);
         shouldClassify = true;
       } else {
         // Skip read messages, ensure no tag
-        console.log(`Initial Load: Skipping read message ${messageId}`);
+        console.log(`InboxZen: Initial Load: Skipping read message ${messageId}`);
         const existingTag = item.querySelector('.inboxzen-tag');
         if (existingTag) existingTag.remove();
         continue; // Skip to next item
@@ -439,17 +447,17 @@ async function processMessages(isInitialLoad = false) {
       // --- Subsequent Load (e.g., triggered by observer) ---
       if (isUnread) {
         // Always re-classify unread/notified messages on subsequent loads
-        console.log(`Subsequent Load: Processing unread/notified message ${messageId}`);
+        console.log(`InboxZen: Subsequent Load: Processing unread/notified message ${messageId}`);
         shouldClassify = true;
       } else {
         // Read message encountered on subsequent load
         if (cachedClassifications[messageId]) {
           // Use cache if available
           category = cachedClassifications[messageId];
-          console.log(`Subsequent Load: Using cached category for read message ${messageId}: ${category}`);
+          console.log(`InboxZen: Subsequent Load: Using cached category for read message ${messageId}: ${category}`);
         } else {
           // Read message, not in cache - do nothing, ensure no tag
-          console.log(`Subsequent Load: Skipping read message ${messageId} (not in cache)`);
+          console.log(`InboxZen: Subsequent Load: Skipping read message ${messageId} (not in cache)`);
            const existingTag = item.querySelector('.inboxzen-tag');
            if (existingTag) existingTag.remove();
           continue; // Skip applying category
@@ -471,12 +479,12 @@ async function processMessages(isInitialLoad = false) {
 
       // Force re-classification by clearing cache first for reliability
       if (cachedClassifications[messageId]) {
-        console.log(`Clearing cache for ${messageId} before re-classification.`);
+        console.log(`InboxZen: Clearing cache for ${messageId} before re-classification.`);
         delete cachedClassifications[messageId];
       }
 
       category = await classifyMessage(messageText, senderName, subject);
-      console.log(`Classified ${messageId} as: ${category}`);
+      console.log(`InboxZen: Classified ${messageId} as: ${category}`);
 
       // Update cache with the new result
       cachedClassifications[messageId] = category;
@@ -492,11 +500,11 @@ async function processMessages(isInitialLoad = false) {
     // --- Update Cache in Storage (if needed) ---
     // We only call updateCache once per message that required classification/caching
     if (requiresCacheUpdate) {
-      console.log(' calling update cache');
+      console.log('InboxZen: calling update cache');
       updateCache(); // Send the entire updated local cache to background
     }
   }
-  console.log(`Finished processing messages. Initial Load: ${isInitialLoad}`);
+  console.log(`InboxZen: Finished processing messages. Initial Load: ${isInitialLoad}`);
 }
 
 // Extract message text from a conversation card
@@ -553,7 +561,7 @@ async function classifyMessage(text, sender, subject) {
       const aiCategory = await classifyWithOpenAI(fullText);
       return aiCategory;
     } catch (error) {
-      console.error('OpenAI classification failed:', error);
+      console.error('InboxZen: OpenAI classification failed:', error);
     }
   }
   
@@ -596,7 +604,7 @@ async function classifyWithOpenAI(text) {
       }
     }
   } catch (error) {
-    console.error('OpenAI API error:', error);
+    console.error('InboxZen: OpenAI API error:', error);
   }
   
   return 'Other';
@@ -651,7 +659,7 @@ function applyCategory(messageItem, category) {
 
 // Update classification cache
 function updateCache() {
-  console.log('Updating cache');
+  console.log('InboxZen: Updating cache');
   chrome.runtime.sendMessage({
     action: 'updateCache',
     cache: cachedClassifications
@@ -772,13 +780,13 @@ function setupReadStatusObserver() {
               const conversationCard = mutation.target.closest('.msg-conversation-card');
 
               if (conversationCard) {
-                console.log(`Notification badge removed from conversation ${conversationCard.id}, marking as read.`);
+                console.log(`InboxZen: Notification badge removed from conversation ${conversationCard.id}, marking as read.`);
                 // Call the function to remove the tag and cache entry
                 handleMessageRead(conversationCard);
               } else {
                  // It's possible the card itself was removed, or the structure is unexpected.
                  // We might not need to do anything here if the card is gone anyway.
-                 console.log('Notification element removed, but parent conversation card not found directly from mutation target.');
+                 console.log('InboxZen: Notification element removed, but parent conversation card not found directly from mutation target.');
               }
             }
           }
@@ -794,10 +802,10 @@ function setupReadStatusObserver() {
       childList: true, // Watch for nodes being added or removed
       subtree: true    // Watch descendants as well
     });
-    console.log('Read status observer (badge removal) setup successfully');
+    console.log('InboxZen: Read status observer (badge removal) setup successfully');
   } else {
     // Retry if the container isn't found immediately
-    console.warn('Messages container not found for read status observer, retrying...');
+    console.warn('InboxZen: Messages container not found for read status observer, retrying...');
     setTimeout(setupReadStatusObserver, 1000);
   }
 }
@@ -815,7 +823,7 @@ function handleMessageRead(conversationCard) {
   const isInProcessed = processedSnippets.has(conversationId);
 
   if (existingTag || isInCache || isInProcessed) {
-    console.log(`Message ${conversationId} marked as read. Removing tag and cache entry.`);
+    console.log(`InboxZen: Message ${conversationId} marked as read. Removing tag and cache entry.`);
 
     // Remove the tag from the UI
     if (existingTag) {
@@ -836,7 +844,7 @@ function handleMessageRead(conversationCard) {
 
     // If the cache was modified, update the storage
     if (cacheUpdated) {
-      console.log(' calling update cache');
+      console.log('InboxZen: calling update cache');
       updateCache();
     }
   }
@@ -845,8 +853,8 @@ function handleMessageRead(conversationCard) {
 // Initial execution
 setTimeout(() => {
   if (window.location.href.includes('linkedin.com/messaging')) {
-    loadSettings().then(() => {
-      console.log(' calling process messages');
+    loadSettingsAndCache().then(() => {
+      console.log('InboxZen: calling process messages');
       processMessages();
       setupMessageObserver();
       setupContentChangeObserver();
